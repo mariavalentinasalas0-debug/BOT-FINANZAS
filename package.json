@@ -1,14 +1,15 @@
 {
   "name": "whatsapp-finance-bot",
   "version": "1.0.0",
-  "description": "Chatbot de WhatsApp para finanzas con IA Gemini y Supabase",
+  "description": "Chatbot de WhatsApp para finanzas",
   "main": "index.js",
   "type": "module",
   "scripts": {
+    "build": "echo 'Build complete'",
     "start": "node index.js"
   },
   "dependencies": {
-    "@google/genai": "^0.1.1",
+    "@google/generative-ai": "^0.21.0",
     "@supabase/supabase-js": "^2.49.1",
     "dotenv": "^16.4.7",
     "express": "^4.21.2",
