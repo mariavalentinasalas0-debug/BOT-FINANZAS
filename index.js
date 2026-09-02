@@ -21,7 +21,7 @@ const USER_PHONE_NUMBER = process.env.USER_PHONE_NUMBER;
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
 
-// Funciones de base de datos
+// Base de datos: Movimientos
 async function registrarMovimiento({ tipo, monto, categoria, descripcion, medio_pago }) {
   try {
     const { data, error } = await supabase
@@ -45,6 +45,7 @@ async function registrarMovimiento({ tipo, monto, categoria, descripcion, medio_
   }
 }
 
+// Base de datos: Resumen
 async function consultarResumen({ periodo }) {
   try {
     const now = new Date();
@@ -86,6 +87,7 @@ async function consultarResumen({ periodo }) {
   }
 }
 
+// Base de datos: Recordatorios
 async function crearRecordatorio({ titulo, monto, fecha_vencimiento }) {
   try {
     const { error } = await supabase
@@ -131,6 +133,7 @@ async function marcarPagado({ titulo }) {
   }
 }
 
+// Base de datos: Ahorros
 async function gestionarAhorro({ accion, meta, monto }) {
   try {
     if (accion === "sumar") {
@@ -153,16 +156,15 @@ async function gestionarAhorro({ accion, meta, monto }) {
   }
 }
 
-// IA con Gemini
+// IA Gemini
 async function procesarConIA(texto) {
-  const modelNames = ["gemini-2.0-flash", "gemini-1.5-flash-latest", "gemini-pro"];
-  let lastError = null;
+  const modelNames = ["gemini-3.6-flash", "gemini-2.5-flash", "gemini-2.0-flash"];
 
   for (const modelName of modelNames) {
     try {
       const model = genAI.getGenerativeModel({
         model: modelName,
-        systemInstruction: `Eres "FinBot", un asistente personal de WhatsApp para finanzas. Sé conciso, amigable y usa emojis. Fecha actual: ${new Date().toISOString().split("T")[0]}.`,
+        systemInstruction: `Eres "FinBot", un asistente personal de finanzas para WhatsApp. Sé conciso, amigable y usa emojis. Fecha actual: ${new Date().toISOString().split("T")[0]}.`,
         tools: [
           {
             functionDeclarations: [
@@ -182,7 +184,7 @@ async function procesarConIA(texto) {
               },
               {
                 name: "consultarResumen",
-                description: "Consulta el balance y gastos",
+                description: "Consulta balance y gastos",
                 parameters: {
                   type: "OBJECT",
                   properties: {
@@ -253,14 +255,14 @@ async function procesarConIA(texto) {
 
       return result.response.text();
     } catch (error) {
-      console.error(`Intento con ${modelName} falló:`, error.message);
-      lastError = error;
+      console.error(`Error con modelo ${modelName}:`, error.message);
     }
   }
 
-  return "Ups, tuve un inconveniente al procesar tu mensaje. Intenta de nuevo.";
+  return "Ups, tuve un problema temporal al procesar tu mensaje. Intenta de nuevo.";
 }
 
+// Envío a WhatsApp
 async function enviarWhatsApp(to, texto) {
   try {
     const resp = await fetch(`https://graph.facebook.com/v21.0/${PHONE_NUMBER_ID}/messages`, {
