@@ -24,6 +24,7 @@ let qrCodeData = "";
 let isConnected = false;
 let sock = null;
 let reconnectTimer = null;
+const sentMessageIds = new Set();
 
 // ==========================================
 // 🗄️ BASE DE DATOS (SUPABASE)
@@ -164,13 +165,13 @@ async function gestionarAhorro({ accion, meta, monto }) {
 // ==========================================
 
 async function procesarConIA(texto) {
-  const modelNames = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"];
+  const modelNames = ["gemini-3.6-flash", "gemini-2.5-flash", "gemini-2.0-flash"];
 
   for (const modelName of modelNames) {
     try {
       const model = genAI.getGenerativeModel({
         model: modelName,
-        systemInstruction: `Eres "FinBot", el asistente personal de finanzas del usuario en WhatsApp. Sé conciso, amigable y usa emojis. Fecha actual: ${new Date().toISOString().split("T")[0]}.`,
+        systemInstruction: `Eres "FinBot", el asistente personal de finanzas de WhatsApp. Sé conciso, amigable y usa emojis. Fecha actual: ${new Date().toISOString().split("T")[0]}.`,
         tools: [
           {
             functionDeclarations: [
@@ -265,11 +266,11 @@ async function procesarConIA(texto) {
     }
   }
 
-  return "Ups, tuve un problema temporal al procesar tu mensaje. Intenta de nuevo.";
+  return "No pude procesar ese movimiento. Intenta escribirme: 'Gasté $X en Y' o 'Cobré $X'.";
 }
 
 // ==========================================
-// 📲 CONEXIÓN WHATSAPP BAILEYS
+// 📲 CONEXIÓN WHATSAPP BAILEYS (CON ANTIBUCLE)
 // ==========================================
 
 async function iniciarWhatsApp() {
@@ -277,8 +278,7 @@ async function iniciarWhatsApp() {
 
   try {
     const { state, saveCreds } = await useMultiFileAuthState("auth_info_baileys");
-    const { version, isLatest } = await fetchLatestBaileysVersion();
-    console.log(`Usando versión de WhatsApp Web: ${version.join(".")}, es la última: ${isLatest}`);
+    const { version } = await fetchLatestBaileysVersion();
 
     sock = makeWASocket({
       version,
@@ -305,7 +305,7 @@ async function iniciarWhatsApp() {
         const statusCode = lastDisconnect?.error?.output?.statusCode;
         const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
         isConnected = false;
-        console.log(`Conexión cerrada (código: ${statusCode}). Reconectando en 5 segundos...`);
+        console.log(`Conexión cerrada (${statusCode}). Reconectando...`);
         if (shouldReconnect) {
           reconnectTimer = setTimeout(() => iniciarWhatsApp(), 5000);
         }
@@ -316,12 +316,21 @@ async function iniciarWhatsApp() {
       }
     });
 
-    sock.ev.on("messages.upsert", async ({ messages }) => {
+    sock.ev.on("messages.upsert", async ({ messages, type }) => {
+      if (type !== "notify") return;
       const m = messages[0];
       if (!m.message || m.key.remoteJid === "status@broadcast") return;
 
+      // 🛡️ ANTI-BUCLE: Ignorar mensajes que el propio bot envió
+      if (m.key.id && sentMessageIds.has(m.key.id)) return;
+
       const texto = m.message?.conversation || m.message?.extendedTextMessage?.text;
-      if (!texto) return;
+      if (!texto || texto.trim().length === 0) return;
+
+      // 🛡️ ANTI-BUCLE: Si el mensaje empieza con un emoji de respuesta del bot, ignorar
+      if (texto.startsWith("✅") || texto.startsWith("📊") || texto.startsWith("⏰") || texto.startsWith("💰") || texto.startsWith("🎯") || texto.startsWith("🎉") || texto.startsWith("No pude")) {
+        return;
+      }
 
       const jid = m.key.remoteJid;
       console.log(`📩 Mensaje recibido en (${jid}): "${texto}"`);
@@ -329,8 +338,15 @@ async function iniciarWhatsApp() {
       // Procesar con IA
       const respuesta = await procesarConIA(texto);
 
-      // Responder en el chat
-      await sock.sendMessage(jid, { text: respuesta });
+      // Enviar respuesta y registrar el ID para no autoreponderse
+      const sentMsg = await sock.sendMessage(jid, { text: respuesta });
+      if (sentMsg?.key?.id) {
+        sentMessageIds.add(sentMsg.key.id);
+        if (sentMessageIds.size > 200) {
+          const first = sentMessageIds.values().next().value;
+          sentMessageIds.delete(first);
+        }
+      }
     });
   } catch (err) {
     console.error("Error al iniciar WhatsApp:", err);
@@ -340,10 +356,7 @@ async function iniciarWhatsApp() {
 
 iniciarWhatsApp();
 
-// ==========================================
-// 🌐 PÁGINA WEB PARA ESCANEAR EL QR
-// ==========================================
-
+// Página Web
 app.get("/", (req, res) => {
   if (isConnected) {
     res.send(`
@@ -356,8 +369,8 @@ app.get("/", (req, res) => {
       </head>
       <body style="font-family:sans-serif; text-align:center; padding:40px; background:#f0f2f5;">
         <div style="background:white; max-width:450px; margin:auto; padding:30px; border-radius:15px; box-shadow:0 4px 10px rgba(0,0,0,0.1);">
-          <h1 style="color:#25D366; font-size:26px;">🎉 ¡Bot Conectado!</h1>
-          <p style="font-size:16px; color:#555;">Tu bot de finanzas personal ya está activo.</p>
+          <h1 style="color:#25D366; font-size:26px;">🎉 ¡Bot Conectado y Activo!</h1>
+          <p style="font-size:16px; color:#555;">Tu asistente de finanzas está listo 24/7.</p>
           <p style="font-size:15px; background:#e7f8ee; color:#128c7e; padding:12px; border-radius:8px;">
             Abre WhatsApp en tu celular y escribe en tu chat <b>"Mensajes contigo mismo"</b>.
           </p>
@@ -384,7 +397,6 @@ app.get("/", (req, res) => {
             3. Toca <b>Vincular un dispositivo</b> y apunta a la pantalla:
           </p>
           <img src="${qrCodeData}" style="width:260px; height:260px; border:2px solid #25D366; padding:8px; border-radius:10px;" />
-          <p style="color:#888; font-size:12px; margin-top:10px;">(El QR se actualiza solo si vence)</p>
         </div>
       </body>
       </html>
@@ -401,7 +413,6 @@ app.get("/", (req, res) => {
       <body style="font-family:sans-serif; text-align:center; padding:50px; background:#f0f2f5;">
         <div style="background:white; max-width:400px; margin:auto; padding:30px; border-radius:15px; box-shadow:0 4px 10px rgba(0,0,0,0.1);">
           <h3>⏳ Iniciando motor de WhatsApp...</h3>
-          <p style="color:#666;">Generando código QR en unos segundos...</p>
         </div>
       </body>
       </html>
