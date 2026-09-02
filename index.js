@@ -4,7 +4,7 @@ import { createClient } from "@supabase/supabase-js";
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import pkg from "@whiskeysockets/baileys";
 const makeWASocket = pkg.default || pkg;
-const { useMultiFileAuthState, DisconnectReason, Browsers } = pkg;
+const { useMultiFileAuthState, DisconnectReason, Browsers, fetchLatestBaileysVersion } = pkg;
 import QRCode from "qrcode";
 import pino from "pino";
 import cron from "node-cron";
@@ -26,7 +26,7 @@ let sock = null;
 let reconnectTimer = null;
 
 // ==========================================
-// 🗄️ FUNCIONES DE BASE DE DATOS (SUPABASE)
+// 🗄️ BASE DE DATOS (SUPABASE)
 // ==========================================
 
 async function registrarMovimiento({ tipo, monto, categoria, descripcion }) {
@@ -86,7 +86,7 @@ async function consultarResumen({ periodo }) {
       .map(([cat, total]) => `  • ${cat}: $${total}`)
       .join("\n");
 
-    return `📊 *Resumen (${periodo || "este mes"}):*\n💵 Ingresos: $${totalIngresos}\n💸 Gastos: $${totalEgresos}\n💰 Balance: $${totalIngresos - totalEgresos}\n\n*Gastos por categoría:*\n${desglose || "Sin gastos registrados aún"}`;
+    return `📊 *Resumen (${periodo || "este mes"}):*\n💵 Ingresos: $${totalIngresos}\n💸 Gastos: $${totalEgresos}\n💰 Balance: $${totalIngresos - totalEgresos}\n\n*Gastos por categoría:*\n${desglose || "Sin gastos aún"}`;
   } catch (err) {
     return `Error al consultar: ${err.message}`;
   }
@@ -170,7 +170,7 @@ async function procesarConIA(texto) {
     try {
       const model = genAI.getGenerativeModel({
         model: modelName,
-        systemInstruction: `Eres "FinBot", el asistente personal de WhatsApp para finanzas. Sé conciso, amigable y usa emojis. Fecha actual: ${new Date().toISOString().split("T")[0]}.`,
+        systemInstruction: `Eres "FinBot", el asistente personal de finanzas del usuario en WhatsApp. Sé conciso, amigable y usa emojis. Fecha actual: ${new Date().toISOString().split("T")[0]}.`,
         tools: [
           {
             functionDeclarations: [
@@ -269,64 +269,73 @@ async function procesarConIA(texto) {
 }
 
 // ==========================================
-// 📲 CONEXIÓN WHATSAPP CON BAILEYS (QR)
+// 📲 CONEXIÓN WHATSAPP BAILEYS
 // ==========================================
 
 async function iniciarWhatsApp() {
   if (reconnectTimer) clearTimeout(reconnectTimer);
 
-  const { state, saveCreds } = await useMultiFileAuthState("auth_info_baileys");
+  try {
+    const { state, saveCreds } = await useMultiFileAuthState("auth_info_baileys");
+    const { version, isLatest } = await fetchLatestBaileysVersion();
+    console.log(`Usando versión de WhatsApp Web: ${version.join(".")}, es la última: ${isLatest}`);
 
-  sock = makeWASocket({
-    auth: state,
-    logger: pino({ level: "silent" }),
-    printQRInTerminal: false,
-    browser: Browsers.macOS("Desktop"),
-    connectTimeoutMs: 60000,
-    keepAliveIntervalMs: 15000
-  });
+    sock = makeWASocket({
+      version,
+      auth: state,
+      logger: pino({ level: "silent" }),
+      printQRInTerminal: false,
+      browser: Browsers.ubuntu("Chrome"),
+      connectTimeoutMs: 60000,
+      keepAliveIntervalMs: 25000,
+      syncFullHistory: false
+    });
 
-  sock.ev.on("creds.update", saveCreds);
+    sock.ev.on("creds.update", saveCreds);
 
-  sock.ev.on("connection.update", async (update) => {
-    const { connection, lastDisconnect, qr } = update;
+    sock.ev.on("connection.update", async (update) => {
+      const { connection, lastDisconnect, qr } = update;
 
-    if (qr) {
-      qrCodeData = await QRCode.toDataURL(qr);
-      console.log("📲 Código QR listo para escanear!");
-    }
-
-    if (connection === "close") {
-      const statusCode = lastDisconnect?.error?.output?.statusCode;
-      const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
-      isConnected = false;
-      console.log(`Conexión cerrada (${statusCode}). Reconectando en 5 segundos...`);
-      if (shouldReconnect) {
-        reconnectTimer = setTimeout(() => iniciarWhatsApp(), 5000);
+      if (qr) {
+        qrCodeData = await QRCode.toDataURL(qr);
+        console.log("📲 Código QR listo para escanear!");
       }
-    } else if (connection === "open") {
-      isConnected = true;
-      qrCodeData = "";
-      console.log("🎉 ¡BOT DE WHATSAPP CONECTADO CON ÉXITO!");
-    }
-  });
 
-  sock.ev.on("messages.upsert", async ({ messages }) => {
-    const m = messages[0];
-    if (!m.message || m.key.remoteJid === "status@broadcast") return;
+      if (connection === "close") {
+        const statusCode = lastDisconnect?.error?.output?.statusCode;
+        const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
+        isConnected = false;
+        console.log(`Conexión cerrada (código: ${statusCode}). Reconectando en 5 segundos...`);
+        if (shouldReconnect) {
+          reconnectTimer = setTimeout(() => iniciarWhatsApp(), 5000);
+        }
+      } else if (connection === "open") {
+        isConnected = true;
+        qrCodeData = "";
+        console.log("🎉 ¡BOT DE WHATSAPP CONECTADO CON ÉXITO!");
+      }
+    });
 
-    const texto = m.message?.conversation || m.message?.extendedTextMessage?.text;
-    if (!texto) return;
+    sock.ev.on("messages.upsert", async ({ messages }) => {
+      const m = messages[0];
+      if (!m.message || m.key.remoteJid === "status@broadcast") return;
 
-    const jid = m.key.remoteJid;
-    console.log(`📩 Mensaje recibido en (${jid}): "${texto}"`);
+      const texto = m.message?.conversation || m.message?.extendedTextMessage?.text;
+      if (!texto) return;
 
-    // Procesar con IA
-    const respuesta = await procesarConIA(texto);
+      const jid = m.key.remoteJid;
+      console.log(`📩 Mensaje recibido en (${jid}): "${texto}"`);
 
-    // Responder en el mismo chat
-    await sock.sendMessage(jid, { text: respuesta });
-  });
+      // Procesar con IA
+      const respuesta = await procesarConIA(texto);
+
+      // Responder en el chat
+      await sock.sendMessage(jid, { text: respuesta });
+    });
+  } catch (err) {
+    console.error("Error al iniciar WhatsApp:", err);
+    reconnectTimer = setTimeout(() => iniciarWhatsApp(), 5000);
+  }
 }
 
 iniciarWhatsApp();
@@ -348,7 +357,7 @@ app.get("/", (req, res) => {
       <body style="font-family:sans-serif; text-align:center; padding:40px; background:#f0f2f5;">
         <div style="background:white; max-width:450px; margin:auto; padding:30px; border-radius:15px; box-shadow:0 4px 10px rgba(0,0,0,0.1);">
           <h1 style="color:#25D366; font-size:26px;">🎉 ¡Bot Conectado!</h1>
-          <p style="font-size:16px; color:#555;">Tu bot de finanzas está activo las 24 horas.</p>
+          <p style="font-size:16px; color:#555;">Tu bot de finanzas personal ya está activo.</p>
           <p style="font-size:15px; background:#e7f8ee; color:#128c7e; padding:12px; border-radius:8px;">
             Abre WhatsApp en tu celular y escribe en tu chat <b>"Mensajes contigo mismo"</b>.
           </p>
@@ -375,7 +384,7 @@ app.get("/", (req, res) => {
             3. Toca <b>Vincular un dispositivo</b> y apunta a la pantalla:
           </p>
           <img src="${qrCodeData}" style="width:260px; height:260px; border:2px solid #25D366; padding:8px; border-radius:10px;" />
-          <p style="color:#888; font-size:12px; margin-top:10px;">(El QR se actualiza automáticamente)</p>
+          <p style="color:#888; font-size:12px; margin-top:10px;">(El QR se actualiza solo si vence)</p>
         </div>
       </body>
       </html>
@@ -386,13 +395,13 @@ app.get("/", (req, res) => {
       <html>
       <head>
         <meta charset="utf-8">
-        <meta http-equiv="refresh" content="5">
+        <meta http-equiv="refresh" content="4">
         <title>Iniciando Bot...</title>
       </head>
       <body style="font-family:sans-serif; text-align:center; padding:50px; background:#f0f2f5;">
         <div style="background:white; max-width:400px; margin:auto; padding:30px; border-radius:15px; box-shadow:0 4px 10px rgba(0,0,0,0.1);">
           <h3>⏳ Iniciando motor de WhatsApp...</h3>
-          <p style="color:#666;">Generando código QR en 5 segundos...</p>
+          <p style="color:#666;">Generando código QR en unos segundos...</p>
         </div>
       </body>
       </html>
