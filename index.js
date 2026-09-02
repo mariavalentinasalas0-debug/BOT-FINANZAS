@@ -2,7 +2,9 @@ import express from "express";
 import dotenv from "dotenv";
 import { createClient } from "@supabase/supabase-js";
 import { GoogleGenerativeAI } from "@google/generative-ai";
-import makeWASocket, { useMultiFileAuthState, DisconnectReason } from "@whiskeysockets/baileys";
+import pkg from "@whiskeysockets/baileys";
+const makeWASocket = pkg.default || pkg;
+const { useMultiFileAuthState, DisconnectReason } = pkg;
 import QRCode from "qrcode";
 import pino from "pino";
 import cron from "node-cron";
@@ -262,9 +264,7 @@ async function procesarConIA(texto) {
   return "Ups, tuve un problema temporal al procesar tu mensaje. Intenta de nuevo.";
 }
 
-// ==========================================
-// 📲 CONEXIÓN WHATSAPP CON BAILEYS (QR)
-// ==========================================
+// WhatsApp Baileys con QR
 async function iniciarWhatsApp() {
   const { state, saveCreds } = await useMultiFileAuthState("auth_info_baileys");
 
@@ -281,13 +281,13 @@ async function iniciarWhatsApp() {
 
     if (qr) {
       qrCodeData = await QRCode.toDataURL(qr);
-      console.log("📲 Nuevo Código QR generado. Entra a tu enlace web para escanearlo!");
+      console.log("📲 Código QR listo para escanear en la página web!");
     }
 
     if (connection === "close") {
       const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
       isConnected = false;
-      console.log("Conexión cerrada. Reconectando...", shouldReconnect);
+      console.log("Reconectando WhatsApp...", shouldReconnect);
       if (shouldReconnect) iniciarWhatsApp();
     } else if (connection === "open") {
       isConnected = true;
@@ -303,26 +303,17 @@ async function iniciarWhatsApp() {
     const texto = m.message?.conversation || m.message?.extendedTextMessage?.text;
     if (!texto) return;
 
-    // Solo responde en tu chat contigo mismo (o cuando le hablas directamente)
     const jid = m.key.remoteJid;
-    const isMe = m.key.fromMe;
+    console.log(`📩 Mensaje en (${jid}): "${texto}"`);
 
-    console.log(`📩 Mensaje en chat (${jid}): "${texto}"`);
-
-    // Procesar con IA
     const respuesta = await procesarConIA(texto);
-
-    // Responder en el chat
     await sock.sendMessage(jid, { text: respuesta });
   });
 }
 
-// Iniciar WhatsApp
 iniciarWhatsApp();
 
-// ==========================================
-// 🌐 PÁGINA WEB PARA ESCANEAR EL QR
-// ==========================================
+// Página Web del QR
 app.get("/", (req, res) => {
   if (isConnected) {
     res.send(`
@@ -335,7 +326,7 @@ app.get("/", (req, res) => {
     res.send(`
       <div style="text-align:center; font-family:sans-serif; margin-top:30px;">
         <h1 style="color:#075E54;">📱 Escanea el Código QR con tu WhatsApp</h1>
-        <p style="font-size:16px;">1. Abre WhatsApp en tu celular<br>2. Ve a <b>Ajustes / Menú > Dispositivos vinculados</b><br>3. Toca <b>Vincular un dispositivo</b> y apunta la cámara a este QR:</p>
+        <p style="font-size:16px;">1. Abre WhatsApp en tu celular<br>2. Ve a <b>Ajustes / Menú > Dispositivos vinculados</b><br>3. Toca <b>Vincular un dispositivo</b> y apunta tu cámara:</p>
         <img src="${qrCodeData}" style="width:300px; height:300px; border:2px solid #ccc; padding:10px; border-radius:10px;" />
         <p style="color:#666; font-size:14px;">(Si el QR cambia, recarga esta página)</p>
       </div>
