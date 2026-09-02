@@ -1,18 +1,21 @@
 {
   "name": "whatsapp-finance-bot",
   "version": "1.0.0",
-  "description": "Chatbot de WhatsApp para finanzas",
+  "description": "Chatbot de WhatsApp con QR para finanzas",
   "main": "index.js",
   "type": "module",
   "scripts": {
-    "build": "echo 'Build complete'",
+    "build": "echo 'Build OK'",
     "start": "node index.js"
   },
   "dependencies": {
     "@google/generative-ai": "^0.21.0",
     "@supabase/supabase-js": "^2.49.1",
+    "@whiskeysockets/baileys": "^6.7.12",
     "dotenv": "^16.4.7",
     "express": "^4.21.2",
-    "node-cron": "^3.0.3"
+    "node-cron": "^3.0.3",
+    "pino": "^9.6.0",
+    "qrcode": "^1.5.4"
   }
 }
