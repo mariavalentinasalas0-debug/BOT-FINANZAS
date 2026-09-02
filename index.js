@@ -2,27 +2,28 @@ import express from "express";
 import dotenv from "dotenv";
 import { createClient } from "@supabase/supabase-js";
 import { GoogleGenerativeAI } from "@google/generative-ai";
+import makeWASocket, { useMultiFileAuthState, DisconnectReason } from "@whiskeysockets/baileys";
+import QRCode from "qrcode";
+import pino from "pino";
 import cron from "node-cron";
 
 dotenv.config();
 
 const app = express();
-app.use(express.json());
-
 const PORT = process.env.PORT || 3000;
-const VERIFY_TOKEN = process.env.VERIFY_TOKEN || "mi_token_secreto_finanzas";
-const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
-const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_KEY = process.env.SUPABASE_KEY;
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-const USER_PHONE_NUMBER = process.env.USER_PHONE_NUMBER;
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
 
+let qrCodeData = "";
+let isConnected = false;
+let sock = null;
+
 // Base de datos: Movimientos
-async function registrarMovimiento({ tipo, monto, categoria, descripcion, medio_pago }) {
+async function registrarMovimiento({ tipo, monto, categoria, descripcion }) {
   try {
     const { data, error } = await supabase
       .from("movimientos")
@@ -32,7 +33,7 @@ async function registrarMovimiento({ tipo, monto, categoria, descripcion, medio_
           monto: Number(monto),
           categoria: categoria || "Varios",
           descripcion: descripcion || "",
-          medio_pago: medio_pago || "Efectivo"
+          medio_pago: "Efectivo"
         }
       ])
       .select();
@@ -40,7 +41,6 @@ async function registrarMovimiento({ tipo, monto, categoria, descripcion, medio_
     if (error) throw error;
     return `✅ *${tipo === "egreso" ? "Gasto" : "Ingreso"} registrado:*\n💵 Monto: $${monto}\n🏷️ Categoría: ${categoria || "Varios"}\n📝 Detalle: ${descripcion || "Sin detalle"}`;
   } catch (err) {
-    console.error("Error registrando:", err);
     return `Error al registrar: ${err.message}`;
   }
 }
@@ -158,13 +158,13 @@ async function gestionarAhorro({ accion, meta, monto }) {
 
 // IA Gemini
 async function procesarConIA(texto) {
-  const modelNames = ["gemini-3.6-flash", "gemini-2.5-flash", "gemini-2.0-flash"];
+  const modelNames = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"];
 
   for (const modelName of modelNames) {
     try {
       const model = genAI.getGenerativeModel({
         model: modelName,
-        systemInstruction: `Eres "FinBot", un asistente personal de finanzas para WhatsApp. Sé conciso, amigable y usa emojis. Fecha actual: ${new Date().toISOString().split("T")[0]}.`,
+        systemInstruction: `Eres "FinBot", el asistente personal de finanzas del usuario en WhatsApp. Sé conciso, amigable y usa emojis. Fecha actual: ${new Date().toISOString().split("T")[0]}.`,
         tools: [
           {
             functionDeclarations: [
@@ -262,70 +262,92 @@ async function procesarConIA(texto) {
   return "Ups, tuve un problema temporal al procesar tu mensaje. Intenta de nuevo.";
 }
 
-// Envío a WhatsApp
-async function enviarWhatsApp(to, texto) {
-  try {
-    const resp = await fetch(`https://graph.facebook.com/v21.0/${PHONE_NUMBER_ID}/messages`, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${WHATSAPP_TOKEN}`,
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify({
-        messaging_product: "whatsapp",
-        to,
-        type: "text",
-        text: { body: texto }
-      })
-    });
-    const resData = await resp.json();
-    console.log("📤 Respuesta enviada a WhatsApp:", resData);
-  } catch (err) {
-    console.error("Error enviando WhatsApp:", err);
-  }
+// ==========================================
+// 📲 CONEXIÓN WHATSAPP CON BAILEYS (QR)
+// ==========================================
+async function iniciarWhatsApp() {
+  const { state, saveCreds } = await useMultiFileAuthState("auth_info_baileys");
+
+  sock = makeWASocket({
+    auth: state,
+    logger: pino({ level: "silent" }),
+    printQRInTerminal: false
+  });
+
+  sock.ev.on("creds.update", saveCreds);
+
+  sock.ev.on("connection.update", async (update) => {
+    const { connection, lastDisconnect, qr } = update;
+
+    if (qr) {
+      qrCodeData = await QRCode.toDataURL(qr);
+      console.log("📲 Nuevo Código QR generado. Entra a tu enlace web para escanearlo!");
+    }
+
+    if (connection === "close") {
+      const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
+      isConnected = false;
+      console.log("Conexión cerrada. Reconectando...", shouldReconnect);
+      if (shouldReconnect) iniciarWhatsApp();
+    } else if (connection === "open") {
+      isConnected = true;
+      qrCodeData = "";
+      console.log("🎉 ¡BOT DE WHATSAPP CONECTADO CON ÉXITO!");
+    }
+  });
+
+  sock.ev.on("messages.upsert", async ({ messages }) => {
+    const m = messages[0];
+    if (!m.message || m.key.remoteJid === "status@broadcast") return;
+
+    const texto = m.message?.conversation || m.message?.extendedTextMessage?.text;
+    if (!texto) return;
+
+    // Solo responde en tu chat contigo mismo (o cuando le hablas directamente)
+    const jid = m.key.remoteJid;
+    const isMe = m.key.fromMe;
+
+    console.log(`📩 Mensaje en chat (${jid}): "${texto}"`);
+
+    // Procesar con IA
+    const respuesta = await procesarConIA(texto);
+
+    // Responder en el chat
+    await sock.sendMessage(jid, { text: respuesta });
+  });
 }
 
-// Webhook GET
-app.get("/webhook", (req, res) => {
-  if (req.query["hub.mode"] === "subscribe" && req.query["hub.verify_token"] === VERIFY_TOKEN) {
-    res.status(200).send(req.query["hub.challenge"]);
+// Iniciar WhatsApp
+iniciarWhatsApp();
+
+// ==========================================
+// 🌐 PÁGINA WEB PARA ESCANEAR EL QR
+// ==========================================
+app.get("/", (req, res) => {
+  if (isConnected) {
+    res.send(`
+      <div style="text-align:center; font-family:sans-serif; margin-top:50px;">
+        <h1 style="color:#25D366;">🎉 ¡Tu Bot de WhatsApp está CONECTADO y ACTIVO!</h1>
+        <p style="font-size:18px;">Ya puedes abrir tu WhatsApp y escribir en tu chat contigo mismo.</p>
+      </div>
+    `);
+  } else if (qrCodeData) {
+    res.send(`
+      <div style="text-align:center; font-family:sans-serif; margin-top:30px;">
+        <h1 style="color:#075E54;">📱 Escanea el Código QR con tu WhatsApp</h1>
+        <p style="font-size:16px;">1. Abre WhatsApp en tu celular<br>2. Ve a <b>Ajustes / Menú > Dispositivos vinculados</b><br>3. Toca <b>Vincular un dispositivo</b> y apunta la cámara a este QR:</p>
+        <img src="${qrCodeData}" style="width:300px; height:300px; border:2px solid #ccc; padding:10px; border-radius:10px;" />
+        <p style="color:#666; font-size:14px;">(Si el QR cambia, recarga esta página)</p>
+      </div>
+    `);
   } else {
-    res.sendStatus(403);
+    res.send(`
+      <div style="text-align:center; font-family:sans-serif; margin-top:50px;">
+        <h2>Generando código QR...</h2>
+        <p>Espera 10 segundos y recarga esta página (F5).</p>
+      </div>
+    `);
   }
 });
 
-// Webhook POST
-app.post("/webhook", async (req, res) => {
-  res.sendStatus(200);
-  try {
-    const msg = req.body?.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
-    if (msg?.type === "text") {
-      const from = msg.from;
-      const texto = msg.text.body;
-      console.log(`📩 Mensaje recibido de ${from}: "${texto}"`);
-      const respuesta = await procesarConIA(texto);
-      await enviarWhatsApp(from, respuesta);
-    }
-  } catch (e) {
-    console.error("Error webhook POST:", e);
-  }
-});
-
-app.get("/", (req, res) => res.send("🤖 Bot de Finanzas ACTIVO 24/7!"));
-
-// Cron Recordatorios (9 AM)
-cron.schedule("0 9 * * *", async () => {
-  if (!USER_PHONE_NUMBER) return;
-  try {
-    const hoy = new Date().toISOString().split("T")[0];
-    const { data } = await supabase.from("recordatorios").select("*").eq("fecha_vencimiento", hoy).eq("pagado", false);
-    if (data?.length) {
-      let txt = `🔔 *¡RECORDATORIOS DE HOY (${hoy})!*\n\n` + data.map((r) => `📌 ${r.titulo} - $${r.monto || ""}`).join("\n");
-      await enviarWhatsApp(USER_PHONE_NUMBER, txt);
-    }
-  } catch (e) {
-    console.error("Error cron:", e);
-  }
-});
-
-app.listen(PORT, () => console.log(`Servidor en puerto ${PORT}`));
+app.listen(PORT, () => console.log(`Servidor QR listo en puerto ${PORT}`));
