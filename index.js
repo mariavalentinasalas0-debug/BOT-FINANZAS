@@ -38,7 +38,7 @@ async function registrarMovimiento({ tipo, monto, categoria, descripcion, medio_
       .select();
 
     if (error) throw error;
-    return `✅ ${tipo === "egreso" ? "Gasto" : "Ingreso"} de $${monto} registrado en ${categoria || "Varios"}.`;
+    return `✅ *${tipo === "egreso" ? "Gasto" : "Ingreso"} registrado:*\n💵 Monto: $${monto}\n🏷️ Categoría: ${categoria || "Varios"}\n📝 Detalle: ${descripcion || "Sin detalle"}`;
   } catch (err) {
     console.error("Error registrando:", err);
     return `Error al registrar: ${err.message}`;
@@ -80,7 +80,7 @@ async function consultarResumen({ periodo }) {
       .map(([cat, total]) => `  • ${cat}: $${total}`)
       .join("\n");
 
-    return `📊 *Resumen (${periodo || "este mes"}):*\n💵 Ingresos: $${totalIngresos}\n💸 Gastos: $${totalEgresos}\n💰 Balance: $${totalIngresos - totalEgresos}\n\n*Gastos por categoría:*\n${desglose || "Sin gastos registrados aún"}`;
+    return `📊 *Resumen (${periodo || "este mes"}):*\n💵 Ingresos: $${totalIngresos}\n💸 Gastos: $${totalEgresos}\n💰 Balance: $${totalIngresos - totalEgresos}\n\n*Gastos por categoría:*\n${desglose || "Sin gastos aún"}`;
   } catch (err) {
     return `Error al consultar: ${err.message}`;
   }
@@ -92,7 +92,7 @@ async function crearRecordatorio({ titulo, monto, fecha_vencimiento }) {
       .from("recordatorios")
       .insert([{ titulo, monto: monto ? Number(monto) : null, fecha_vencimiento }]);
     if (error) throw error;
-    return `⏰ Recordatorio de "${titulo}" guardado para el ${fecha_vencimiento}.`;
+    return `⏰ *Recordatorio guardado:*\n📌 ${titulo}\n💵 $${monto || "N/A"}\n📅 Vence el ${fecha_vencimiento}`;
   } catch (err) {
     return `Error al guardar recordatorio: ${err.message}`;
   }
@@ -137,12 +137,12 @@ async function gestionarAhorro({ accion, meta, monto }) {
       const { data } = await supabase.from("ahorros").select("*").ilike("meta", `%${meta}%`).limit(1);
       if (!data?.length) {
         await supabase.from("ahorros").insert([{ meta, monto_actual: Number(monto) }]);
-        return `🎯 Creé la meta "${meta}" con $${monto}.`;
+        return `🎯 Creé la meta *"${meta}"* con $${monto}.`;
       }
       const item = data[0];
       const nuevo = Number(item.monto_actual) + Number(monto);
       await supabase.from("ahorros").update({ monto_actual: nuevo }).eq("id", item.id);
-      return `💰 Sumaste $${monto} a "${item.meta}". Total acumulado: $${nuevo}.`;
+      return `💰 Sumaste $${monto} a *"${item.meta}"*.\nTotal acumulado: $${nuevo}.`;
     }
     const { data } = await supabase.from("ahorros").select("*");
     if (!data?.length) return "Aún no tienes metas de ahorro registradas.";
@@ -155,107 +155,115 @@ async function gestionarAhorro({ accion, meta, monto }) {
 
 // IA con Gemini
 async function procesarConIA(texto) {
-  try {
-    const model = genAI.getGenerativeModel({
-      model: "gemini-1.5-flash",
-      tools: [
-        {
-          functionDeclarations: [
-            {
-              name: "registrarMovimiento",
-              description: "Registra un gasto o ingreso",
-              parameters: {
-                type: "OBJECT",
-                properties: {
-                  tipo: { type: "STRING", enum: ["ingreso", "egreso"] },
-                  monto: { type: "NUMBER" },
-                  categoria: { type: "STRING" },
-                  descripcion: { type: "STRING" }
-                },
-                required: ["tipo", "monto"]
-              }
-            },
-            {
-              name: "consultarResumen",
-              description: "Consulta el balance y gastos",
-              parameters: {
-                type: "OBJECT",
-                properties: {
-                  periodo: { type: "STRING", enum: ["hoy", "este_mes"] }
+  const modelNames = ["gemini-2.0-flash", "gemini-1.5-flash-latest", "gemini-pro"];
+  let lastError = null;
+
+  for (const modelName of modelNames) {
+    try {
+      const model = genAI.getGenerativeModel({
+        model: modelName,
+        systemInstruction: `Eres "FinBot", un asistente personal de WhatsApp para finanzas. Sé conciso, amigable y usa emojis. Fecha actual: ${new Date().toISOString().split("T")[0]}.`,
+        tools: [
+          {
+            functionDeclarations: [
+              {
+                name: "registrarMovimiento",
+                description: "Registra un gasto o ingreso",
+                parameters: {
+                  type: "OBJECT",
+                  properties: {
+                    tipo: { type: "STRING", enum: ["ingreso", "egreso"] },
+                    monto: { type: "NUMBER" },
+                    categoria: { type: "STRING" },
+                    descripcion: { type: "STRING" }
+                  },
+                  required: ["tipo", "monto"]
+                }
+              },
+              {
+                name: "consultarResumen",
+                description: "Consulta el balance y gastos",
+                parameters: {
+                  type: "OBJECT",
+                  properties: {
+                    periodo: { type: "STRING", enum: ["hoy", "este_mes"] }
+                  }
+                }
+              },
+              {
+                name: "crearRecordatorio",
+                description: "Crea recordatorio de pago",
+                parameters: {
+                  type: "OBJECT",
+                  properties: {
+                    titulo: { type: "STRING" },
+                    monto: { type: "NUMBER" },
+                    fecha_vencimiento: { type: "STRING", description: "AAAA-MM-DD" }
+                  },
+                  required: ["titulo", "fecha_vencimiento"]
+                }
+              },
+              {
+                name: "consultarRecordatorios",
+                description: "Consulta pagos pendientes",
+                parameters: { type: "OBJECT", properties: {} }
+              },
+              {
+                name: "marcarPagado",
+                description: "Marca servicio como pagado",
+                parameters: {
+                  type: "OBJECT",
+                  properties: { titulo: { type: "STRING" } },
+                  required: ["titulo"]
+                }
+              },
+              {
+                name: "gestionarAhorro",
+                description: "Gestiona metas de ahorro",
+                parameters: {
+                  type: "OBJECT",
+                  properties: {
+                    accion: { type: "STRING", enum: ["sumar", "consultar"] },
+                    meta: { type: "STRING" },
+                    monto: { type: "NUMBER" }
+                  },
+                  required: ["accion"]
                 }
               }
-            },
-            {
-              name: "crearRecordatorio",
-              description: "Crea recordatorio de pago",
-              parameters: {
-                type: "OBJECT",
-                properties: {
-                  titulo: { type: "STRING" },
-                  monto: { type: "NUMBER" },
-                  fecha_vencimiento: { type: "STRING", description: "AAAA-MM-DD" }
-                },
-                required: ["titulo", "fecha_vencimiento"]
-              }
-            },
-            {
-              name: "consultarRecordatorios",
-              description: "Consulta pagos pendientes",
-              parameters: { type: "OBJECT", properties: {} }
-            },
-            {
-              name: "marcarPagado",
-              description: "Marca servicio como pagado",
-              parameters: {
-                type: "OBJECT",
-                properties: { titulo: { type: "STRING" } },
-                required: ["titulo"]
-              }
-            },
-            {
-              name: "gestionarAhorro",
-              description: "Gestiona metas de ahorro",
-              parameters: {
-                type: "OBJECT",
-                properties: {
-                  accion: { type: "STRING", enum: ["sumar", "consultar"] },
-                  meta: { type: "STRING" },
-                  monto: { type: "NUMBER" }
-                },
-                required: ["accion"]
-              }
-            }
-          ]
-        }
-      ]
-    });
+            ]
+          }
+        ]
+      });
 
-    const chat = model.startChat();
-    const result = await chat.sendMessage(texto);
-    const call = result.response.functionCalls()?.[0];
+      const chat = model.startChat();
+      const result = await chat.sendMessage(texto);
+      const call = result.response.functionCalls()?.[0];
 
-    if (call) {
-      let output = "";
-      if (call.name === "registrarMovimiento") output = await registrarMovimiento(call.args);
-      else if (call.name === "consultarResumen") output = await consultarResumen(call.args);
-      else if (call.name === "crearRecordatorio") output = await crearRecordatorio(call.args);
-      else if (call.name === "consultarRecordatorios") output = await consultarRecordatorios();
-      else if (call.name === "marcarPagado") output = await marcarPagado(call.args);
-      else if (call.name === "gestionarAhorro") output = await gestionarAhorro(call.args);
+      if (call) {
+        let output = "";
+        if (call.name === "registrarMovimiento") output = await registrarMovimiento(call.args);
+        else if (call.name === "consultarResumen") output = await consultarResumen(call.args);
+        else if (call.name === "crearRecordatorio") output = await crearRecordatorio(call.args);
+        else if (call.name === "consultarRecordatorios") output = await consultarRecordatorios();
+        else if (call.name === "marcarPagado") output = await marcarPagado(call.args);
+        else if (call.name === "gestionarAhorro") output = await gestionarAhorro(call.args);
 
-      return output;
+        return output;
+      }
+
+      return result.response.text();
+    } catch (error) {
+      console.error(`Intento con ${modelName} falló:`, error.message);
+      lastError = error;
     }
-
-    return result.response.text();
-  } catch (error) {
-    console.error("Error IA:", error);
-    return "Ups, tuve un inconveniente al procesar tu mensaje. Intenta de nuevo.";
   }
+
+  return "Ups, tuve un inconveniente al procesar tu mensaje. Intenta de nuevo.";
 }
 
 async function enviarWhatsApp(to, texto) {
   try {
-    await fetch(`https://graph.facebook.com/v21.0/${PHONE_NUMBER_ID}/messages`, {
+    const resp = await fetch(`https://graph.facebook.com/v21.0/${PHONE_NUMBER_ID}/messages`, {
       method: "POST",
       headers: {
         Authorization: `Bearer ${WHATSAPP_TOKEN}`,
@@ -268,6 +276,8 @@ async function enviarWhatsApp(to, texto) {
         text: { body: texto }
       })
     });
+    const resData = await resp.json();
+    console.log("📤 Respuesta enviada a WhatsApp:", resData);
   } catch (err) {
     console.error("Error enviando WhatsApp:", err);
   }
@@ -290,6 +300,7 @@ app.post("/webhook", async (req, res) => {
     if (msg?.type === "text") {
       const from = msg.from;
       const texto = msg.text.body;
+      console.log(`📩 Mensaje recibido de ${from}: "${texto}"`);
       const respuesta = await procesarConIA(texto);
       await enviarWhatsApp(from, respuesta);
     }
@@ -300,7 +311,7 @@ app.post("/webhook", async (req, res) => {
 
 app.get("/", (req, res) => res.send("🤖 Bot de Finanzas ACTIVO 24/7!"));
 
-// Cron Recordatorios
+// Cron Recordatorios (9 AM)
 cron.schedule("0 9 * * *", async () => {
   if (!USER_PHONE_NUMBER) return;
   try {
